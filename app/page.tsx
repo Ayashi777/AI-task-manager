@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { ChevronLeft, ChevronRight, Edit, Trash2, Send, Download, Upload, Moon, Sun } from "lucide-react"
+import { ChevronLeft, ChevronRight, Edit, Trash2, Send, Download, Upload, Moon, Sun, AlertCircle } from "lucide-react"
 import { useTheme } from "next-themes"
 import { generateText } from "ai"
 import { google } from "@ai-sdk/google"
@@ -17,6 +17,8 @@ import { google } from "@ai-sdk/google"
 import { AuthGuard } from "@/components/auth-guard"
 import { UserProfile } from "@/components/user-profile"
 import { useAuth } from "@/contexts/auth-context"
+import { useApiKey } from "@/contexts/api-key-context"
+import { ApiKeySettings } from "@/components/api-key-settings"
 
 // Types
 interface Task {
@@ -93,6 +95,7 @@ export default function TaskTracker() {
   })
 
   const { user } = useAuth()
+  const { googleApiKey, isKeyValid } = useApiKey()
   const LOCAL_STORAGE_KEY = user?.id ? `taskAppAI_v1_${user.id}` : "taskAppAI_v1_guest"
 
   useEffect(() => {
@@ -261,7 +264,12 @@ export default function TaskTracker() {
       const completedTasks = log.tasksToday.filter((t) => t.isDone)
       const incompleteTasks = log.tasksToday.filter((t) => !t.isDone)
 
-      const prompt = `Создай краткое саммари дня на основе следующих данных:
+      // Check if we have a valid API key
+      if (googleApiKey && isKeyValid) {
+        try {
+          const { text } = await generateText({
+            model: google("gemini-1.5-flash", { apiKey: googleApiKey }),
+            prompt: `Создай краткое саммари дня на основе следующих данных:
 
 Дата: ${log.date}
 Выполненные задачи: ${completedTasks.map((t) => `${t.title}: ${t.description}`).join(", ") || "Нет"}
@@ -271,15 +279,24 @@ export default function TaskTracker() {
 Трудности дня: ${log.challenge || "Нет"}
 Оценка дня: ${log.rating || "Нет"}
 
-Создай краткое саммари (2-3 абзаца) на русском языке, выделяя ключевые достижения, проблемы и инсайты.`
+Создай краткое саммари (2-3 абзаца) на русском языке, выделяя ключевые достижения, проблемы и инсайты.`,
+          })
 
-      const { text } = await generateText({
-        model: google("gemini-1.5-flash"),
-        prompt,
-      })
-
-      const updatedLog = { ...log, daySummary: text }
-      setDailyLogs((prev) => ({ ...prev, [viewingDate]: updatedLog }))
+          const updatedLog = { ...log, daySummary: text }
+          setDailyLogs((prev) => ({ ...prev, [viewingDate]: updatedLog }))
+        } catch (apiError) {
+          console.error("API error:", apiError)
+          // Fallback to simple summary
+          const summary = generateFallbackSummary(log, completedTasks, incompleteTasks)
+          const updatedLog = { ...log, daySummary: summary }
+          setDailyLogs((prev) => ({ ...prev, [viewingDate]: updatedLog }))
+        }
+      } else {
+        // No valid API key, use fallback
+        const summary = generateFallbackSummary(log, completedTasks, incompleteTasks)
+        const updatedLog = { ...log, daySummary: summary }
+        setDailyLogs((prev) => ({ ...prev, [viewingDate]: updatedLog }))
+      }
     } catch (error) {
       console.error("Error generating summary:", error)
       alert("Ошибка при генерации саммари")
@@ -340,19 +357,46 @@ ${analysisData}
 Проанализируй прогресс и дай рекомендации.`
       }
 
-      const { text } = await generateText({
-        model: google("gemini-1.5-flash"),
-        prompt: `Ты - ИИ-коуч по продуктивности. Помогай анализировать задачи и достигать целей. ${prompt}`,
-      })
+      if (googleApiKey && isKeyValid) {
+        try {
+          const { text } = await generateText({
+            model: google("gemini-1.5-flash", { apiKey: googleApiKey }),
+            prompt: `Ты - ИИ-коуч по продуктивности. Помогай анализировать задачи и достигать целей. ${prompt}`,
+          })
 
-      const assistantMessage: ChatMessage = {
-        id: `msg-${Date.now()}`,
-        role: "assistant",
-        content: text,
-        timestamp: Date.now(),
+          const assistantMessage: ChatMessage = {
+            id: `msg-${Date.now()}`,
+            role: "assistant",
+            content: text,
+            timestamp: Date.now(),
+          }
+
+          setChatMessages((prev) => [...prev, assistantMessage])
+        } catch (apiError) {
+          console.error("API error:", apiError)
+          // Fallback response when API fails
+          const fallbackResponse = generateFallbackChatResponse(chatInput)
+          const assistantMessage: ChatMessage = {
+            id: `msg-${Date.now()}`,
+            role: "assistant",
+            content: fallbackResponse,
+            timestamp: Date.now(),
+          }
+
+          setChatMessages((prev) => [...prev, assistantMessage])
+        }
+      } else {
+        // No valid API key, use fallback
+        const fallbackResponse = generateFallbackChatResponse(chatInput)
+        const assistantMessage: ChatMessage = {
+          id: `msg-${Date.now()}`,
+          role: "assistant",
+          content: fallbackResponse,
+          timestamp: Date.now(),
+        }
+
+        setChatMessages((prev) => [...prev, assistantMessage])
       }
-
-      setChatMessages((prev) => [...prev, assistantMessage])
     } catch (error) {
       console.error("Error sending message:", error)
       const errorMessage: ChatMessage = {
@@ -404,6 +448,133 @@ ${analysisData}
     reader.readAsText(file)
   }
 
+  // Helper function to generate fallback summary
+  const generateFallbackSummary = (log: DailyLog, completedTasks: Task[], incompleteTasks: Task[]) => {
+    const completionRate =
+      log.tasksToday.length > 0 ? Math.round((completedTasks.length / log.tasksToday.length) * 100) : 0
+
+    let summary = `📊 Саммари дня ${log.date}\n\n`
+
+    summary += `Продуктивность: ${completionRate}% (${completedTasks.length} из ${log.tasksToday.length} задач выполнено)\n\n`
+
+    if (completedTasks.length > 0) {
+      summary += `✅ Выполненные задачи:\n${completedTasks.map((t) => `• ${t.title}`).join("\n")}\n\n`
+    }
+
+    if (incompleteTasks.length > 0) {
+      summary += `⏳ Невыполненные задачи:\n${incompleteTasks.map((t) => `• ${t.title}`).join("\n")}\n\n`
+    }
+
+    if (log.insight) {
+      summary += `💡 Инсайт дня: ${log.insight}\n\n`
+    }
+
+    if (log.challenge) {
+      summary += `⚠️ Трудности: ${log.challenge}\n\n`
+    }
+
+    if (log.rating) {
+      summary += `⭐ Оценка дня: ${log.rating}/10\n\n`
+    }
+
+    if (log.tasksForTomorrow.length > 0) {
+      summary += `🎯 Планы на будущее:\n${log.tasksForTomorrow.map((t) => `• ${t.title}`).join("\n")}`
+    }
+
+    if (!googleApiKey || !isKeyValid) {
+      summary += `\n\n📝 Примечание: Для использования ИИ-анализа добавьте свой Google AI API ключ в настройках.`
+    }
+
+    return summary
+  }
+
+  // Helper function to generate fallback chat responses
+  const generateFallbackChatResponse = (input: string) => {
+    const lowerInput = input.toLowerCase()
+
+    if (!googleApiKey || !isKeyValid) {
+      if (lowerInput.includes("ключ") || lowerInput.includes("api") || lowerInput.includes("настрой")) {
+        return `🔑 Для использования ИИ-функций необходимо добавить Google AI API ключ.
+
+Как получить ключ:
+1. Перейдите на сайт Google AI Studio: https://makersuite.google.com/app/apikey
+2. Создайте новый API ключ
+3. Добавьте его в настройках приложения (кнопка "API Ключ" в верхнем меню)
+
+После добавления ключа вы получите доступ к:
+• Персонализированным саммари дня
+• Умному анализу ваших задач и целей
+• Рекомендациям по повышению продуктивности`
+      }
+    }
+
+    if (lowerInput.includes("анализ") || lowerInput.includes("прогресс")) {
+      return `📊 ${!googleApiKey || !isKeyValid ? "Для полного анализа прогресса необходимо добавить Google AI API ключ. " : ""}
+
+Однако я могу предложить несколько общих рекомендаций:
+
+🎯 Советы по продуктивности:
+• Разбивайте большие задачи на маленькие
+• Устанавливайте конкретные временные рамки
+• Регулярно делайте перерывы
+• Анализируйте свои успехи и неудачи
+
+📈 Для отслеживания прогресса:
+• Ведите ежедневную рефлексию
+• Отмечайте выполненные задачи
+• Ставьте реалистичные цели
+• Празднуйте маленькие победы
+
+${!googleApiKey || !isKeyValid ? "💡 Добавьте Google AI API ключ в настройках для получения персонализированных советов и детального анализа ваших данных." : ""}`
+    }
+
+    if (lowerInput.includes("задач") || lowerInput.includes("планирование")) {
+      return `📋 Советы по управлению задачами:
+
+✅ Эффективное планирование:
+• Используйте метод SMART для постановки целей
+• Приоритизируйте задачи по важности и срочности
+• Планируйте время с запасом на непредвиденные обстоятельства
+
+⏰ Управление временем:
+• Используйте технику Pomodoro (25 минут работы + 5 минут отдыха)
+• Группируйте похожие задачи
+• Избегайте многозадачности
+
+${!googleApiKey || !isKeyValid ? "🎯 Для получения персонализированных советов на основе ваших данных, добавьте Google AI API ключ в настройках." : ""}`
+    }
+
+    if (lowerInput.includes("мотивация") || lowerInput.includes("цел")) {
+      return `🎯 Советы по достижению целей:
+
+💪 Поддержание мотивации:
+• Визуализируйте результат
+• Разбивайте большие цели на этапы
+• Отмечайте промежуточные достижения
+• Найдите партнера по подотчетности
+
+📈 Отслеживание прогресса:
+• Ведите ежедневные записи
+• Анализируйте что работает, а что нет
+• Корректируйте планы при необходимости
+
+${!googleApiKey || !isKeyValid ? "🔧 Для детального анализа ваших целей и персональных рекомендаций, добавьте Google AI API ключ в настройках." : ""}`
+    }
+
+    return `🤖 Привет! Я ваш ассистент по продуктивности.
+
+${!googleApiKey || !isKeyValid ? "К сожалению, для полноценной работы мне нужен доступ к Google AI API. Сейчас я работаю в ограниченном режиме." : ""}
+
+💡 Что я могу предложить:
+• Общие советы по продуктивности
+• Рекомендации по планированию
+• Базовые техники управления временем
+
+${!googleApiKey || !isKeyValid ? "🔧 Для получения персонализированных советов на основе ваших данных, добавьте Google AI API ключ в настройках." : ""}
+
+Чем могу помочь${!googleApiKey || !isKeyValid ? " в рамках базового функционала" : ""}?`
+  }
+
   const log = getViewingLog()
   const isToday = viewingDate === currentDate
 
@@ -415,6 +586,7 @@ ${analysisData}
           <div className="flex justify-between items-center mb-6">
             <h1 className="text-3xl font-bold">Трекер Задач и Целей</h1>
             <div className="flex items-center gap-2">
+              <ApiKeySettings />
               <UserProfile />
               <Button variant="outline" size="icon" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
@@ -668,6 +840,12 @@ ${analysisData}
               <Card>
                 <CardHeader>
                   <CardTitle>Чат с ИИ-ассистентом</CardTitle>
+                  {!googleApiKey || !isKeyValid ? (
+                    <div className="text-sm text-amber-500 flex items-center gap-1 mt-1">
+                      <AlertCircle className="h-4 w-4" />
+                      <span>Для полного функционала добавьте Google AI API ключ</span>
+                    </div>
+                  ) : null}
                 </CardHeader>
                 <CardContent>
                   <div className="h-96 border rounded-lg flex flex-col">

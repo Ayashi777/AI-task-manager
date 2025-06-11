@@ -4,6 +4,7 @@ import { Inter } from "next/font/google"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { AuthProvider } from "@/contexts/auth-context"
+import { ApiKeyProvider } from "@/contexts/api-key-context"
 
 const inter = Inter({ subsets: ["latin", "cyrillic"] })
 
@@ -23,7 +24,9 @@ export default function RootLayout({
     <html lang="ru" suppressHydrationWarning>
       <body className={inter.className}>
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
-          <AuthProvider>{children}</AuthProvider>
+          <AuthProvider>
+            <ApiKeyProvider>{children}</ApiKeyProvider>
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>
